@@ -1,0 +1,95 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA with Xcode 26
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    env:
+      PROJECT: Halospace v2.xcodeproj
+      SCHEME: Halospace v2
+      CONFIGURATION: Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          XCODE_PATH="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$XCODE_PATH" ]; then
+            echo "No Xcode 26 installation found on this runner."
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_PATH"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -E 'iphoneos|iphonesimulator'
+
+      - name: Build unsigned archive
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/HaloSpace.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            ONLY_ACTIVE_ARCH=NO
+
+      - name: Package IPA
+        id: package
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/HaloSpace.xcarchive/Products/Applications/Halospace v2.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Archived app not found at $APP_PATH"
+            find "$RUNNER_TEMP/HaloSpace.xcarchive" -maxdepth 4 -type d
+            exit 1
+          fi
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")"
+          IPA_NAME="HaloSpace-${VERSION}-${BUILD}-unsigned.ipa"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$IPA_NAME"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+          echo "ipa_path=$RUNNER_TEMP/$IPA_NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "$IPA_NAME"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HaloSpace-unsigned-ipa
+          path: ${{ steps.package.outputs.ipa_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HaloSpace-build-log
+          path: ${{ runner.temp }}/Logs
+          if-no-files-found: ignore
+          retention-days: 7
